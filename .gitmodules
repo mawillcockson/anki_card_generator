@@ -1,0 +1,4 @@
+[submodule "text2png"]
+	path = text2png
+	url = git@github.com:mawillcockson/text2png.git
+	branch = master
