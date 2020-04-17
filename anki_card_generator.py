@@ -19,28 +19,24 @@ from typing import (
     TypedDict,
     TypeVar,
     Union,
+    Dict,
 )
 
-from invoke import Collection, Config, Context, Program, task
-from invoke.config import merge_dicts
-from invoke.tasks import Task
-from invoke.watchers import Responder
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
+import logging
+from invoke import run
 
 ## Program defaults
-# Can be overriden elsewhere, too
 PROG_NAME = sys.argv[0]
-default_font = "KanjiStrokeOrders"
-default_output_dir = "./output"
-default_canvas_size = "500x500"
-default_padding = 10
-default_background = "white"
-default_text_color = "black"
+default_media_dir = "~/scoop/persist/anki/data/User 1/collection.media"
+default_log_level = logging.WARN
 
-## Classes used frequently
+## Classes
 Size = NamedTuple("Size", [("height", Number), ("width", Number)])
 Position = NamedTuple("Position", [("x", Number), ("y", Number)])
 SPath = Union[Path, str]
 OptionalSPath = Optional[SPath]
+Num = Union[int, float]
 
 
 class CharacterGroup(NamedTuple):
@@ -60,60 +56,75 @@ class VocabGroup(NamedTuple):
 NoteGroup = Union[CharacterGroup, VocabGroup]
 
 
-class Pictures(TypedDict):
+class Files(TypedDict):
     text: str
     picture: Path
 
 
+class Pictures(Files):
+    pass
+
+
+class Notes(Files):
+    pass
+
+
+## Functions
+def check_collisions(lines: List[str], directory: Union[Path, str]) -> Dict[str, Path]:
+    dir_path = Path(directory)
+    if not (dir_path.is_dir() and dir_path.exists()):
+        raise ValueError(f"'{dir_path}' must be a directory")
+    dir_contents = list(dir_path.iterdir())
+    non_files = [str(path) for path in filter(lambda f: not f.is_file(), dir_contents)]
+    colliding_names = [line for line in lines if (line + ".png") in non_files]
+    for line in colliding_names:
+        logging.error(
+            f"'{line}.png' can't be created because there's something that's not a picture in the directory '{directory}' that already has that name"
+        )
+    if colliding_names:
+        colliding_list = "\n".join(colliding_names)
+        raise FileExistsError(
+            f"These are names of files that would be created in '{directory}', but can't:\n{colliding_list}"
+        )
+    return {file.stem: file for file in dir_contents}
+
+
 def get_notes(text_file: Union[str, Path]) -> List[NoteGroup]:
+    if not Path(text_file).is_file():
+        logging.error(f"'{text_file}' needs to be a file containing notes")
+
+    text = Path(text_file).read_text()
+    groups = text.split("\n\n")
+    for group in groups:
+        pass
+
+    raise NotImplementedError(":(")
+
+
+def generate_pictures(media_dir: SPath, picture_text: List[str]) -> Pictures:
     pass
 
 
-def generate_pictures(
-    ctx: Context, media_dir: SPath, picture_text: List[str]
-) -> Pictures:
+def make_anki_notes(notes: List[NoteGroup], pictures: Pictures) -> Notes:
     pass
 
 
-@task( # type: ignore
-    post=[],
-    positional=[],  # Make all arguments into explicit flags by saying none of them are positional
-    optional=["media-dir", "font", "size", "padding", "background", "text-color"],
-)
-def default_task(
-    ctx: Context,
-    text_file: OptionalSPath = None,
+def main(
+    text_file: SPath,
     media_dir: OptionalSPath = None,
     font: Optional[str] = None,
-    size: Optional[str] = None,
-    padding: Optional[int] = None,
+    size: Optional[Size] = None,
+    padding: Optional[Num] = None,
     background: Optional[str] = None,
     text_color: Optional[str] = None,
+    vocab: bool = False,
 ) -> None:
-    if not text_file:
-        notes_file = ctx.args.text_file
+    notes_file = text_file
+
+    if not media_dir:
+        media_folder = Path(default_media_dir).expanduser().resolve()
     else:
-        notes_file = text_file
-
-    if not media_dir and not ctx.args.media_dir:
-        media_folder = ctx.output.default
-    elif not media_dir:
-        media_folder = ctx.args.media_dir
-
-    if not size:
-        size = ctx.args.size
-
-    if not font:
-        font = ctx.args.font
-
-    if padding == None:
-        padding = ctx.args.padding
-
-    if not background:
-        background = ctx.args.background
-
-    if not text_color:
-        text_color = ctx.args.text_color
+        media_folder = Path(media_dir).expanduser().resolve()
 
     notes = get_notes(text_file=notes_file)
     picture_text = [note.word for note in notes if isinstance(note, VocabGroup)]
@@ -121,45 +132,85 @@ def default_task(
         [note.character for note in notes if isinstance(note, CharacterGroup)]
     )
 
-    pictures = generate_pictures(
-        ctx=ctx, media_dir=media_folder, picture_text=picture_text
-    )
-
-    for group in notes:
-        pass
+    pictures = generate_pictures(media_dir=media_folder, picture_text=picture_text)
+    make_anki_notes(notes=notes, pictures=pictures)
 
 
 if __name__ == "__main__":
-    namespace = Collection()
-    namespace.configure(
-        {
-            "output": {"default": default_output_dir},
-            "font": {"default": default_font},
-            "style": {
-                "size": default_canvas_size,
-                "padding": default_padding,
-                "background": default_background,
-                "text_color": default_text_color,
-            },
+    parser = ArgumentParser(
+        description="Uses a text file to generate and download media for Anki to import to make new notes"
+    )
+
+    def str_to_dir(path: str) -> Path:
+        dir = Path(path)
+        if dir.is_dir():
+            return dir
+        else:
+            raise ArgumentTypeError(f"{dir} needs to be a directory that exists")
+
+    def parse_log_level(level: str) -> int:
+        levels = {
+            "critical": logging.CRITICAL,
+            "error": logging.ERROR,
+            "warning": logging.WARNING,
+            "info": logging.INFO,
+            "debug": logging.DEBUG,
         }
+        if not level.lower() in levels:
+            raise ArgumentTypeError(
+                f"'{level}' isn't one of: {' '.join(levels.keys())}"
+            )
+        return levels[level.lower()]
+
+    parser.add_argument(
+        "-f", "--file", type=Path, required=True, help="File with notes entries",
     )
-    namespace.add_task(default_task, default=True)
-    for i, name in enumerate(namespace.tasks["default-task"].post):
-        namespace.tasks["default-task"].post[i] = task(name)
-        namespace.add_task(task(name))
-
-    class SetupConfig(Config):  # type: ignore
-        prefix: str = PROG_NAME
-
-        @staticmethod
-        def global_defaults():  # type: ignore
-            base_defaults = Config.global_defaults()
-            overrides = {
-                "tasks": {"collection_name": PROG_NAME},
-            }
-            return merge_dicts(base=base_defaults, updates=overrides)
-
-    program = Program(
-        name=PROG_NAME, namespace=namespace, config_class=SetupConfig, version="0.0.1"
+    parser.add_argument(
+        "-d",
+        "--media-dir",
+        type=str_to_dir,
+        default=default_media_dir,
+        help="Directory in which to output pictures",
     )
-    program.run()
+    parser.add_argument("--font", help="Font to use for text", required=False)
+    parser.add_argument(
+        "--size",
+        help="Size in pixels to make all character images (e.g. 500x500)",
+        required=False,
+    )
+    parser.add_argument(
+        "--padding",
+        type=float,
+        help="The percentage of the canvas dimensions to use as a blank border",
+        required=False,
+    )
+    parser.add_argument("--background", help="Color for the background", required=False)
+    parser.add_argument(
+        "--text-color", help="Color to use for the text", required=False
+    )
+    parser.add_argument(
+        "--clobber",
+        action="store_true",
+        help="If passed, will overwrite existing files; otherwise, nothing is clobbered",
+    )
+    parser.add_argument(
+        "--log",
+        default=default_log_level,
+        type=parse_log_level,
+        help="Verbosity/log level",
+    )
+
+    args = parser.parse_args()
+    try:
+        main(
+            text_file=args.file,
+            media_dir=args.media_dir,
+            font=args.font,
+            size=args.size,
+            padding=args.padding,
+            background=args.background,
+            text_color=args.text_color,
+            vocab=args.vocab,
+        )
+    except Exception as err:
+        parser.print_help()
