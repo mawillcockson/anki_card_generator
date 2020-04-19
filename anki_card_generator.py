@@ -38,24 +38,28 @@ except ImportError as err:
 PROG_NAME = sys.argv[0]
 default_media_dir = "~/scoop/persist/anki/data/User 1/collection.media"
 default_log_level = logging.WARN
-rtk_index_file = "./rtk_index.txt"
+default_rtk_index_file = Path("../heisig_index/rtk_index.txt")
 
 ## Classes
 comment_re = re_compile(r"^\s*(#|＃).*$")
 blank_re = re_compile(r"^\s+$")
 ends_with_keyword_re = re_compile(r"^[\w\s]+[ a-zA-Z-]+$")
 character_and_keyword_re = re_compile(r"^(?P<character>\w)\s+(?P<keyword>\w+)$")
-character_index_re = re_compile(r"^(?P<index>\d+|\*)\s+(?P<character>\w)$")
+character_index_re = re_compile(
+    r"^(?P<index>\d+|\*)\s+(?P<character>\w)(\W+(?P<alternate>\w))?$"
+)
 story_re = re_compile(r"^story:\s+(?P<story>\w.*)$")
 Size = NamedTuple("Size", [("height", Number), ("width", Number)])
 Position = NamedTuple("Position", [("x", Number), ("y", Number)])
 SPath = Union[Path, str]
 OptionalSPath = Optional[SPath]
 Num = Union[int, float]
+FrameLookup = Callable[[str], Union[int, str, None]]
 
 
 class CharacterGroup(NamedTuple):
     character: str
+    alternate: Optional[str]
     keyword: str
     frame_number: Optional[Union[int, str]]
     story: str
@@ -155,7 +159,7 @@ def parse_vocab_group(paragraph: str) -> VocabGroup:
     )
 
 
-def rtk_index_gen(rtk_index_file: SPath) -> Callable[[str], Union[int, str, None]]:
+def rtk_index_gen(rtk_index_file: SPath) -> FrameLookup:
     """Expects a file to be present in the same directory, where each line
     contains the frame number and corresponding character from Remembering the Kanji vol1, v6"""
     rtk_index = Path(rtk_index_file)
@@ -186,10 +190,9 @@ def rtk_index_gen(rtk_index_file: SPath) -> Callable[[str], Union[int, str, None
     return lookup
 
 
-character_to_frame_number = rtk_index_gen(rtk_index_file)
-
-
-def parse_character_group(paragraph: str) -> CharacterGroup:
+def parse_character_group(
+    paragraph: str, character_to_frame_number: FrameLookup
+) -> CharacterGroup:
     assert isinstance(paragraph, str), f"'{paragraph}' is not a str"
     lines = paragraph.splitlines()
     if not len(lines) == 2:
@@ -215,7 +218,9 @@ def is_character_group(paragraph: str) -> bool:
     return bool(ends_with_keyword_re.search(paragraph))
 
 
-def get_notes(text_file: Union[str, Path]) -> List[NoteGroup]:
+def get_notes(
+    text_file: Union[str, Path], frame_lookup: FrameLookup
+) -> List[NoteGroup]:
     if not Path(text_file).is_file():
         raise error(f"'{text_file}' needs to be a file containing notes")
 
@@ -226,7 +231,9 @@ def get_notes(text_file: Union[str, Path]) -> List[NoteGroup]:
     )
     filtered_groups = map(filter_comments, groups)
     filter_characters = (
-        lambda par: parse_character_group(par) if is_character_group(par) else par
+        lambda par: parse_character_group(par, frame_lookup)
+        if is_character_group(par)
+        else par
     )
     characters_filtered = map(filter_characters, filtered_groups)
     filter_vocab = (
@@ -246,6 +253,7 @@ def make_anki_notes(notes: List[NoteGroup], pictures: Pictures) -> Notes:
 
 def main(
     text_file: SPath,
+    frame_lookup: FrameLookup,
     media_dir: OptionalSPath = None,
     font: Optional[str] = None,
     size: Optional[Size] = None,
@@ -261,7 +269,7 @@ def main(
     else:
         media_folder = Path(media_dir).expanduser().resolve()
 
-    notes = get_notes(text_file=notes_file)
+    notes = get_notes(text_file=notes_file, frame_lookup=frame_lookup)
     picture_text = [note.word for note in notes if isinstance(note, VocabGroup)]
     picture_text.extend(
         [note.character for note in notes if isinstance(note, CharacterGroup)]
@@ -297,8 +305,26 @@ if __name__ == "__main__":
             )
         return levels[level.lower()]
 
+    def path_to_framelookup(path: SPath) -> FrameLookup:
+        index_path = Path(path)
+        try:
+            assert index_path.stat().st_size > 0
+        except FileNotFoundError as err:
+            raise ArgumentTypeError(f"Index file '{index_path}' not found")
+        except AssertionError as err:
+            raise ArgumentTypeError(f"Empty index file: '{index_path}'")
+        if not index_path.is_file():
+            raise ArgumentTypeError(f"Not a file: '{index_path}'")
+        return rtk_index_gen(index_path)
+
     parser.add_argument(
         "-f", "--file", type=Path, required=True, help="File with notes entries",
+    )
+    parser.add_argument(
+        "-i",
+        "--index",
+        type=path_to_framelookup,
+        help="File with heisig frame numbers and their corresponding character(s)",
     )
     parser.add_argument(
         "-d",
@@ -336,6 +362,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if not args.index:
+        heisig_index = path_to_framelookup(default_rtk_index_file)
+    else:
+        heisig_index = args.index
     try:
         main(
             text_file=args.file,
@@ -346,6 +376,7 @@ if __name__ == "__main__":
             background=args.background,
             text_color=args.text_color,
             vocab=args.vocab,
+            frame_lookup=heisig_index,
         )
     except Exception as err:
         parser.print_help()
