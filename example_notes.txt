@@ -1,9 +1,6 @@
-197　字 character
+字　character
 A _child_ in a _house_ is given _character_s for a name
 
-# It'd be nice to be able to look up the frame number automatically
-# https://hochanh.github.io/rtk/rtk1-v6/index.html Grab this before it's removed, along with all the sublinks:
-# It contains animated SVGs showing stroke order, too
 
 漢字
 kanji

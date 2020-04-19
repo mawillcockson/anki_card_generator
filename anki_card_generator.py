@@ -32,6 +32,8 @@ default_media_dir = "~/scoop/persist/anki/data/User 1/collection.media"
 default_log_level = logging.WARN
 
 ## Classes
+comment_re = re_compile(r"^\s*(#|＃).*$")
+blank_re = re_compile(r"^\s+$")
 Size = NamedTuple("Size", [("height", Number), ("width", Number)])
 Position = NamedTuple("Position", [("x", Number), ("y", Number)])
 SPath = Union[Path, str]
@@ -88,14 +90,20 @@ def check_collisions(lines: List[str], directory: Union[Path, str]) -> Dict[str,
         )
     return {file.stem: file for file in dir_contents}
 
+def comment_or_blank(string: str) -> bool:
+    return bool(comment_re.search(string) or blank_re.search(string) or string == "")
 
 def get_notes(text_file: Union[str, Path]) -> List[NoteGroup]:
     if not Path(text_file).is_file():
-        logging.error(f"'{text_file}' needs to be a file containing notes")
+        err_message = f"'{text_file}' needs to be a file containing notes"
+        logging.error(err_message)
+        raise ValueError(err_message)
 
     text = Path(text_file).read_text()
     groups = text.split("\n\n")
-    for group in groups:
+    filter_comments = lambda par: "\n".join(line for line in par.split("\n") if not comment_or_blank(line))
+    filtered_groups = map(filter_comments, groups)
+    for group in filtered_groups:
         pass
 
     raise NotImplementedError(":(")
