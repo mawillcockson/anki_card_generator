@@ -15,7 +15,6 @@ from functools import partial
 
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
 import logging
-from invoke import Context, Config
 
 try:
     from typing import (
@@ -36,6 +35,11 @@ except ImportError as err:
     assert sys.version_info >= (3, 8), "Requires Python 3.8 or higher"
     sys.exit("Could not import needed types from typing module")
 
+try:
+    from text2png.text2png import main as text2png
+except ImportError as err:
+    sys.exit("Can't find text2png.py; try running:\ngit submodule update --init")
+
 ## Program defaults
 PROG_NAME = sys.argv[0]
 default_media_dir = "~/scoop/persist/anki/data/User 1/collection.media"
@@ -52,8 +56,8 @@ character_index_re = re_compile(
     r"^(?P<index>\d+|\*)\s+(?P<character>\w)(\W+(?P<alternate>\w))?$"
 )
 story_re = re_compile(r"^story:\s+(?P<story>\w.*)$")
-#Size = NamedTuple("Size", [("height", Number), ("width", Number)])
-#Position = NamedTuple("Position", [("x", Number), ("y", Number)])
+# Size = NamedTuple("Size", [("height", Number), ("width", Number)])
+# Position = NamedTuple("Position", [("x", Number), ("y", Number)])
 SPath = Union[Path, str]
 OptionalSPath = Optional[SPath]
 Num = Union[int, float]
@@ -81,9 +85,7 @@ class VocabGroup(NamedTuple):
 NoteGroup = Union[CharacterGroup, VocabGroup]
 
 
-class Pictures(TypedDict):
-    text: str
-    picture: Path
+Pictures = Dict[str, Path]
 
 
 ## Functions
@@ -111,27 +113,6 @@ def split_groups(paragraph: str) -> List[str]:
     if len(current_paragraph) > 0:
         paragraphs.append("\n".join(current_paragraph))
     return paragraphs
-
-
-def which_exist(names: List[str], directory: Union[Path, str]) -> Dict[str, Path]:
-    """Checks which file names are already taken in a directory,
-    and raises an error if it wasn't a file that took the name"""
-    dir_path = Path(directory)
-    if not (dir_path.is_dir() and dir_path.exists()):
-        raise ValueError(f"'{dir_path}' must be a directory")
-    dir_contents = list(dir_path.iterdir())
-    non_files = [str(path) for path in filter(lambda f: not f.is_file(), dir_contents)]
-    colliding_names = [name for name in names if name in non_files]
-    for name in colliding_names:
-        logging.error(
-            f"'{name}.png' can't be created because there's something that's not a picture in the directory '{directory}' that already has that name"
-        )
-    if colliding_names:
-        colliding_list = "\n".join(colliding_names)
-        raise FileExistsError(
-            f"These are names of files that would be created in '{directory}', but can't:\n{colliding_list}"
-        )
-    return {file.name: file for file in dir_contents}
 
 
 # I was thinking these could be arpeggio-based parsers, just for fun
@@ -240,38 +221,27 @@ def get_notes(
 
 
 def generate_pictures(
-    media_dir: SPath, picture_text: List[str], clobber: bool = False,
+    media_dir: SPath,
+    picture_text: List[str],
+    clobber: bool = False,
     font: Optional[str] = None,
     size: Optional[str] = None,
     padding: Optional[str] = None,
     background: Optional[str] = None,
     text_color: Optional[str] = None,
 ) -> Pictures:
-
-    config = Config(overrides={"run": {"echo": True}})
-    ctx = Context(config=config)
-    with ctx.cd("./text2png"):
-        pipenv_dir = Path(ctx.run("pipenv --venv").stdout.strip())
-        if sys.platform == "win32":
-            text2png_python = (pipenv_dir/"bin"/"python").resolve()
-        else:
-            text2png_python = (pipenv_dir/"Scripts"/"python.exe").resolve()
-
-        if not text2png_python.exists():
-            ctx.run("pipenv sync")
-    
-    if not text2png_python.exists():
-        raise FileNotFoundError(f"Cannot find text2png python at expected location: {text2png_python}")
-    
-    font_flag = f"--font='{font}'" if font else ""
-    size_flag = f"--size='{size}'" if size else ""
-    padding_flag = f"--padding='{padding}'" if padding else ""
-    background = f"--background='{background}'" if background else ""
-    text_color_flag = f"--text-color='{text_color}'" if text_color else ""
-    flags = " ".join(filter(None, [font_flag, size_flag, padding_flag, background_flag, text_color_flag]))
-    text2png_py = Path("./text2png/text2png.py").resolve()
-    with ctx.cd(Path(media_dir)):
-        ctx.run(f"{text2png_python} {text2png_py}  {flags}")
+    files = text2png(
+        file_or_list=picture_text,
+        output_dir=media_dir,
+        log_level=False,
+        font=font,
+        size=size,
+        padding=padding,
+        background=background,
+        text_color=text_color,
+        clobber=clobber,
+    )
+    return Pictures({file.stem: file for file in files})
 
 
 def make_anki_notes(
@@ -287,8 +257,8 @@ def main(
     output_file: SPath = default_output_file,
     clobber: bool = False,
     font: Optional[str] = None,
-    size: Optional[Size] = None,
-    padding: Optional[Num] = None,
+    size: Optional[str] = None,
+    padding: Optional[str] = None,
     background: Optional[str] = None,
     text_color: Optional[str] = None,
 ) -> None:
@@ -308,7 +278,9 @@ def main(
     )
 
     pictures = generate_pictures(
-        media_dir=media_folder, picture_text=picture_text, clobber=clobber,
+        media_dir=media_folder,
+        picture_text=picture_text,
+        clobber=clobber,
         font=font,
         size=size,
         padding=padding,
