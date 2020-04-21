@@ -41,6 +41,7 @@ PROG_NAME = sys.argv[0]
 default_media_dir = "~/scoop/persist/anki/data/User 1/collection.media"
 default_log_level = logging.WARN
 default_rtk_index_file = Path("../heisig_index/rtk_index.txt")
+default_output_file = Path("./Anki_notes.csv")
 
 ## Classes
 comment_re = re_compile(r"^\s*(#|＃).*$")
@@ -80,17 +81,9 @@ class VocabGroup(NamedTuple):
 NoteGroup = Union[CharacterGroup, VocabGroup]
 
 
-class Files(TypedDict):
+class Pictures(TypedDict):
     text: str
     picture: Path
-
-
-class Pictures(Files):
-    pass
-
-
-class Notes(Files):
-    pass
 
 
 ## Functions
@@ -246,24 +239,29 @@ def get_notes(
     return notes
 
 
-def generate_pictures(media_dir: SPath, picture_text: List[str]) -> Pictures:
+def generate_pictures(
+    media_dir: SPath, picture_text: List[str], clobber: bool
+) -> Pictures:
     raise NotImplementedError("Sorry, can't generate pictures yet")
 
 
-def make_anki_notes(notes: List[NoteGroup], pictures: Pictures) -> Notes:
+def make_anki_notes(
+    notes: List[NoteGroup], pictures: Pictures, output_csv: SPath
+) -> None:
     raise NotImplementedError("Sorry, can't generate notes yet")
 
 
 def main(
     text_file: SPath,
     heisig_lookup: HeisigLookup,
-    media_dir: OptionalSPath = None,
+    media_dir: OptionalSPath = default_media_dir,
+    output_file: SPath = default_output_file,
+    clobber: bool = False,
     font: Optional[str] = None,
     size: Optional[Size] = None,
     padding: Optional[Num] = None,
     background: Optional[str] = None,
     text_color: Optional[str] = None,
-    vocab: bool = False,
 ) -> None:
     notes_file = text_file
 
@@ -272,14 +270,18 @@ def main(
     else:
         media_folder = Path(media_dir).expanduser().resolve()
 
+    output_csv = Path(output_file).expanduser().resolve()
+
     notes = get_notes(text_file=notes_file, heisig_lookup=heisig_lookup)
     picture_text = [note.word for note in notes if isinstance(note, VocabGroup)]
     picture_text.extend(
         [note.character for note in notes if isinstance(note, CharacterGroup)]
     )
 
-    pictures = generate_pictures(media_dir=media_folder, picture_text=picture_text)
-    make_anki_notes(notes=notes, pictures=pictures)
+    pictures = generate_pictures(
+        media_dir=media_folder, picture_text=picture_text, clobber=clobber
+    )
+    make_anki_notes(notes=notes, pictures=pictures, output_csv=output_csv)
 
 
 if __name__ == "__main__":
@@ -296,8 +298,10 @@ if __name__ == "__main__":
 
     def parse_log_level(level: str) -> int:
         levels = {
+            "fatal": logging.FATAL,
             "critical": logging.CRITICAL,
             "error": logging.ERROR,
+            "warn": logging.WARN,
             "warning": logging.WARNING,
             "info": logging.INFO,
             "debug": logging.DEBUG,
@@ -327,14 +331,21 @@ if __name__ == "__main__":
         "-i",
         "--index",
         type=path_to_heisiglookup,
-        help="CSV file with information from Heisig's RTK vol1, 6th edition",
+        help=f"CSV file with information from Heisig's RTK vol1, 6th edition; default '{default_rtk_index_file}'",
     )
     parser.add_argument(
         "-d",
         "--media-dir",
         type=str_to_dir,
         default=default_media_dir,
-        help="Directory in which to output pictures",
+        help=f"Directory in which to output pictures; default '{default_media_dir}'",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-file",
+        type=Path,
+        default=default_output_file,
+        help=f"File to write Anki notes to; default '{default_output_file}'",
     )
     parser.add_argument("--font", help="Font to use for text", required=False)
     parser.add_argument(
@@ -361,7 +372,7 @@ if __name__ == "__main__":
         "--log",
         default=default_log_level,
         type=parse_log_level,
-        help="Verbosity/log level",
+        help=f"Verbosity/log level; default '{logging.getLevelName(default_log_level)}'",
     )
 
     args = parser.parse_args()
@@ -373,12 +384,13 @@ if __name__ == "__main__":
         main(
             text_file=args.file,
             media_dir=args.media_dir,
+            output_file=args.output_file,
+            clobber=args.clobber,
             font=args.font,
             size=args.size,
             padding=args.padding,
             background=args.background,
             text_color=args.text_color,
-            vocab=args.vocab,
             heisig_lookup=heisig_index,
         )
     except Exception as err:
