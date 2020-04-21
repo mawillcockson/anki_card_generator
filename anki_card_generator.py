@@ -15,7 +15,7 @@ from functools import partial
 
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
 import logging
-from invoke import run
+from invoke import Context, Config
 
 try:
     from typing import (
@@ -52,8 +52,8 @@ character_index_re = re_compile(
     r"^(?P<index>\d+|\*)\s+(?P<character>\w)(\W+(?P<alternate>\w))?$"
 )
 story_re = re_compile(r"^story:\s+(?P<story>\w.*)$")
-Size = NamedTuple("Size", [("height", Number), ("width", Number)])
-Position = NamedTuple("Position", [("x", Number), ("y", Number)])
+#Size = NamedTuple("Size", [("height", Number), ("width", Number)])
+#Position = NamedTuple("Position", [("x", Number), ("y", Number)])
 SPath = Union[Path, str]
 OptionalSPath = Optional[SPath]
 Num = Union[int, float]
@@ -240,9 +240,38 @@ def get_notes(
 
 
 def generate_pictures(
-    media_dir: SPath, picture_text: List[str], clobber: bool
+    media_dir: SPath, picture_text: List[str], clobber: bool = False,
+    font: Optional[str] = None,
+    size: Optional[str] = None,
+    padding: Optional[str] = None,
+    background: Optional[str] = None,
+    text_color: Optional[str] = None,
 ) -> Pictures:
-    raise NotImplementedError("Sorry, can't generate pictures yet")
+
+    config = Config(overrides={"run": {"echo": True}})
+    ctx = Context(config=config)
+    with ctx.cd("./text2png"):
+        pipenv_dir = Path(ctx.run("pipenv --venv").stdout.strip())
+        if sys.platform == "win32":
+            text2png_python = (pipenv_dir/"bin"/"python").resolve()
+        else:
+            text2png_python = (pipenv_dir/"Scripts"/"python.exe").resolve()
+
+        if not text2png_python.exists():
+            ctx.run("pipenv sync")
+    
+    if not text2png_python.exists():
+        raise FileNotFoundError(f"Cannot find text2png python at expected location: {text2png_python}")
+    
+    font_flag = f"--font='{font}'" if font else ""
+    size_flag = f"--size='{size}'" if size else ""
+    padding_flag = f"--padding='{padding}'" if padding else ""
+    background = f"--background='{background}'" if background else ""
+    text_color_flag = f"--text-color='{text_color}'" if text_color else ""
+    flags = " ".join(filter(None, [font_flag, size_flag, padding_flag, background_flag, text_color_flag]))
+    text2png_py = Path("./text2png/text2png.py").resolve()
+    with ctx.cd(Path(media_dir)):
+        ctx.run(f"{text2png_python} {text2png_py}  {flags}")
 
 
 def make_anki_notes(
@@ -279,7 +308,12 @@ def main(
     )
 
     pictures = generate_pictures(
-        media_dir=media_folder, picture_text=picture_text, clobber=clobber
+        media_dir=media_folder, picture_text=picture_text, clobber=clobber,
+        font=font,
+        size=size,
+        padding=padding,
+        background=background,
+        text_color=text_color,
     )
     make_anki_notes(notes=notes, pictures=pictures, output_csv=output_csv)
 
