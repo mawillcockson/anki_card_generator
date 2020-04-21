@@ -10,6 +10,8 @@ from pathlib import Path
 from re import compile as re_compile
 from itertools import compress
 from operator import not_
+from csv import DictReader
+from functools import partial
 
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
 import logging
@@ -43,7 +45,7 @@ default_rtk_index_file = Path("../heisig_index/rtk_index.txt")
 ## Classes
 comment_re = re_compile(r"^\s*(#|＃).*$")
 blank_re = re_compile(r"^\s+$")
-ends_with_keyword_re = re_compile(r"^[\w\s]+[ a-zA-Z-]+$")
+first_word_re = re_compile(r"^\w+")
 character_and_keyword_re = re_compile(r"^(?P<character>\w)\s+(?P<keyword>\w+)$")
 character_index_re = re_compile(
     r"^(?P<index>\d+|\*)\s+(?P<character>\w)(\W+(?P<alternate>\w))?$"
@@ -54,7 +56,6 @@ Position = NamedTuple("Position", [("x", Number), ("y", Number)])
 SPath = Union[Path, str]
 OptionalSPath = Optional[SPath]
 Num = Union[int, float]
-FrameLookup = Callable[[str], Union[int, str, None]]
 
 
 class CharacterGroup(NamedTuple):
@@ -62,7 +63,11 @@ class CharacterGroup(NamedTuple):
     alternate: Optional[str]
     keyword: str
     frame_number: Optional[Union[int, str]]
-    story: str
+    story: Optional[str]
+    pronounciation: Optional[str]
+
+
+HeisigLookup = Callable[[str], Optional[CharacterGroup]]
 
 
 class VocabGroup(NamedTuple):
@@ -94,12 +99,18 @@ def error(message: str) -> Exception:
     return Exception(message.lstrip())
 
 
+def comment_or_blank(string: str) -> bool:
+    return bool(comment_re.search(string) or blank_re.search(string) or string == "")
+
+
 def split_groups(paragraph: str) -> List[str]:
     assert isinstance(paragraph, str), f"'{paragraph}' is not a str"
     lines = paragraph.splitlines()
     current_paragraph: List[str] = list()
     paragraphs: List[str] = list()
     for line in lines:
+        if comment_or_blank(line):
+            continue
         if line == "":
             paragraphs.append("\n".join(current_paragraph))
         else:
@@ -109,27 +120,25 @@ def split_groups(paragraph: str) -> List[str]:
     return paragraphs
 
 
-def check_collisions(lines: List[str], directory: Union[Path, str]) -> Dict[str, Path]:
+def which_exist(names: List[str], directory: Union[Path, str]) -> Dict[str, Path]:
+    """Checks which file names are already taken in a directory,
+    and raises an error if it wasn't a file that took the name"""
     dir_path = Path(directory)
     if not (dir_path.is_dir() and dir_path.exists()):
         raise ValueError(f"'{dir_path}' must be a directory")
     dir_contents = list(dir_path.iterdir())
     non_files = [str(path) for path in filter(lambda f: not f.is_file(), dir_contents)]
-    colliding_names = [line for line in lines if (line + ".png") in non_files]
-    for line in colliding_names:
+    colliding_names = [name for name in names if name in non_files]
+    for name in colliding_names:
         logging.error(
-            f"'{line}.png' can't be created because there's something that's not a picture in the directory '{directory}' that already has that name"
+            f"'{name}.png' can't be created because there's something that's not a picture in the directory '{directory}' that already has that name"
         )
     if colliding_names:
         colliding_list = "\n".join(colliding_names)
         raise FileExistsError(
             f"These are names of files that would be created in '{directory}', but can't:\n{colliding_list}"
         )
-    return {file.stem: file for file in dir_contents}
-
-
-def not_comment_or_blank(string: str) -> bool:
-    return not (comment_re.search(string) or blank_re.search(string) or string == "")
+    return {file.name: file for file in dir_contents}
 
 
 # I was thinking these could be arpeggio-based parsers, just for fun
@@ -159,101 +168,95 @@ def parse_vocab_group(paragraph: str) -> VocabGroup:
     )
 
 
-def rtk_index_gen(rtk_index_file: SPath) -> FrameLookup:
+def rtk_index_gen(rtk_index_file: SPath) -> HeisigLookup:
     """Expects a file to be present in the same directory, where each line
     contains the frame number and corresponding character from Remembering the Kanji vol1, v6"""
     rtk_index = Path(rtk_index_file)
     if not rtk_index.is_file():
         raise error(f"Expected to find file '{rtk_index}'")
-    lines = rtk_index.read_text().splitlines()
-    match_list = list(map(character_index_re.search, lines))
-    non_matches = list(compress(lines, map(lambda x: x == None, match_list)))
-    for i, non_match in enumerate(non_matches):
-        logging.error(
-            f"line {i} does not match pattern of number or '*', a space, and a character: {non_match}"
+    lookup_dict: Dict[str, CharacterGroup] = dict()
+    with rtk_index.open() as f:
+        dreader = DictReader(
+            f,
+            fieldnames=[
+                "character",
+                "index",
+                "keyword",
+                "alternate",
+                "pronounciation",
+                "story",
+            ],
         )
-    if len(non_matches) > 0:
-        raise ValueError(f"Does not match format:\n{non_matches}")
+        for row in dreader:
+            lookup_dict[row["character"]] = CharacterGroup(**row)
 
-    matches = filter(None, match_list)
-    lookup_dict: Dict[str, Union[int, str]] = dict()
-    for match in matches:
-        index, character = match.groups()
-        if index.isdigit():  # Recognizes full-width characters
-            lookup_dict[character] = int(index)
-        else:
-            lookup_dict[character] = "*"
-
-    def lookup(character: str) -> Union[int, str, None]:
+    def lookup(character: str) -> Optional[CharacterGroup]:
         return lookup_dict.get(character)
 
     return lookup
 
 
 def parse_character_group(
-    paragraph: str, character_to_frame_number: FrameLookup
+    paragraph: str, heisig_lookup: HeisigLookup,
 ) -> CharacterGroup:
     assert isinstance(paragraph, str), f"'{paragraph}' is not a str"
     lines = paragraph.splitlines()
-    if not len(lines) == 2:
+    if len(lines) < 2:
         raise error(
-            """character groups must have exactly 2 lines:
-               the character and keyword on the first line separated by a space,
-               and the story or mnemonic on the second line"""
+            """character groups must have at least 2 lines:
+               the character on the first line,
+               and the story or mnemonic on the following lines"""
         )
 
-    character_and_keyword = lines[0]
-    match = character_and_keyword_re.search(character_and_keyword)
-    if not match:
-        raise error(f"The following is not a character group:\n{paragraph}")
-    character, keyword = match.groups()
-    frame_number = character_to_frame_number(character)
+    character = lines[0]
+    heisig_info: Optional[CharacterGroup] = heisig_lookup(character)
+    if not heisig_info:
+        raise ValueError(f"Can't find '{character}' in Heisig index")
     story = "\n".join(lines[1:])
     return CharacterGroup(
-        character=character, keyword=keyword, frame_number=frame_number, story=story
+        character=character,
+        keyword=heisig_info.keyword,
+        frame_number=heisig_info.frame_number,
+        story=story,
+        pronounciation=heisig_info.pronounciation,
+        alternate=heisig_info.alternate,
     )
 
 
-def is_character_group(paragraph: str) -> bool:
-    return bool(ends_with_keyword_re.search(paragraph))
+def is_character_group(paragraph: str, heisig_lookup: HeisigLookup) -> bool:
+    match = first_word_re.search(paragraph)
+    return bool(heisig_lookup(match.group() if match else ""))
 
 
 def get_notes(
-    text_file: Union[str, Path], frame_lookup: FrameLookup
+    text_file: Union[str, Path], heisig_lookup: HeisigLookup
 ) -> List[NoteGroup]:
     if not Path(text_file).is_file():
         raise error(f"'{text_file}' needs to be a file containing notes")
 
     text = Path(text_file).read_text()
     groups = split_groups(text)
-    filter_comments = lambda par: "\n".join(
-        filter(not_comment_or_blank, par.split("\n"))
-    )
-    filtered_groups = map(filter_comments, groups)
-    filter_characters = (
-        lambda par: parse_character_group(par, frame_lookup)
-        if is_character_group(par)
-        else par
-    )
-    characters_filtered = map(filter_characters, filtered_groups)
-    filter_vocab = (
-        lambda par: parse_vocab_group(par) if is_character_group(par) else par
-    )
-    vocab_filtered = map(filter_vocab, characters_filtered)
-    return list(vocab_filtered)
+    parse_characters = partial(parse_character_group, heisig_lookup=heisig_lookup)
+    is_char_group = partial(is_character_group, heisig_lookup=heisig_lookup)
+    is_not_char_group = lambda g: not is_char_group(g)
+    characters = map(parse_characters, filter(is_char_group, groups))
+    vocab = map(parse_vocab_group, filter(is_not_char_group, groups))
+    notes: List[NoteGroup] = list(characters)
+    notes.extend(vocab)
+    return notes
 
 
 def generate_pictures(media_dir: SPath, picture_text: List[str]) -> Pictures:
-    pass
+    raise NotImplementedError("Sorry, can't generate pictures yet")
 
 
 def make_anki_notes(notes: List[NoteGroup], pictures: Pictures) -> Notes:
-    pass
+    raise NotImplementedError("Sorry, can't generate notes yet")
 
 
 def main(
     text_file: SPath,
-    frame_lookup: FrameLookup,
+    heisig_lookup: HeisigLookup,
     media_dir: OptionalSPath = None,
     font: Optional[str] = None,
     size: Optional[Size] = None,
@@ -269,7 +272,7 @@ def main(
     else:
         media_folder = Path(media_dir).expanduser().resolve()
 
-    notes = get_notes(text_file=notes_file, frame_lookup=frame_lookup)
+    notes = get_notes(text_file=notes_file, heisig_lookup=heisig_lookup)
     picture_text = [note.word for note in notes if isinstance(note, VocabGroup)]
     picture_text.extend(
         [note.character for note in notes if isinstance(note, CharacterGroup)]
@@ -305,7 +308,7 @@ if __name__ == "__main__":
             )
         return levels[level.lower()]
 
-    def path_to_framelookup(path: SPath) -> FrameLookup:
+    def path_to_heisiglookup(path: SPath) -> HeisigLookup:
         index_path = Path(path)
         try:
             assert index_path.stat().st_size > 0
@@ -323,8 +326,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "-i",
         "--index",
-        type=path_to_framelookup,
-        help="File with heisig frame numbers and their corresponding character(s)",
+        type=path_to_heisiglookup,
+        help="CSV file with information from Heisig's RTK vol1, 6th edition",
     )
     parser.add_argument(
         "-d",
@@ -363,7 +366,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     if not args.index:
-        heisig_index = path_to_framelookup(default_rtk_index_file)
+        heisig_index = path_to_heisiglookup(default_rtk_index_file)
     else:
         heisig_index = args.index
     try:
@@ -376,7 +379,7 @@ if __name__ == "__main__":
             background=args.background,
             text_color=args.text_color,
             vocab=args.vocab,
-            frame_lookup=heisig_index,
+            heisig_lookup=heisig_index,
         )
     except Exception as err:
         parser.print_help()
