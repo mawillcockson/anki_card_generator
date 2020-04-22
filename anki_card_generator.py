@@ -10,8 +10,9 @@ from pathlib import Path
 from re import compile as re_compile
 from itertools import compress
 from operator import not_
-from csv import DictReader
+from csv import DictReader, DictWriter
 from functools import partial
+import atexit
 
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
 import logging
@@ -36,7 +37,7 @@ except ImportError as err:
     sys.exit("Could not import needed types from typing module")
 
 try:
-    from text2png.text2png import main as text2png
+    from text2png.text2png import main as text2png, which_exist
 except ImportError as err:
     sys.exit("Can't find text2png.py; try running:\ngit submodule update --init")
 
@@ -83,6 +84,8 @@ class VocabGroup(NamedTuple):
 
 
 NoteGroup = Union[CharacterGroup, VocabGroup]
+AnyNote = TypeVar("AnyNote", CharacterGroup, VocabGroup)
+NoteTypes = (CharacterGroup, VocabGroup)
 
 
 Pictures = Dict[str, Path]
@@ -230,7 +233,10 @@ def generate_pictures(
     background: Optional[str] = None,
     text_color: Optional[str] = None,
 ) -> Pictures:
-    files = text2png(
+    available_pictures = which_exist(
+        names=[character + ".png" for character in picture_text], directory=media_dir
+    )
+    just_generated = text2png(
         file_or_list=picture_text,
         output_dir=media_dir,
         log_level=False,
@@ -241,13 +247,86 @@ def generate_pictures(
         text_color=text_color,
         clobber=clobber,
     )
-    return Pictures({file.stem: file for file in files})
+    available_pictures.update(just_generated)
+    return Pictures({file.stem: file for file in available_pictures})
+
+
+def notes_to_make(current_csv: SPath, note_groups: List[AnyNote]) -> List[AnyNote]:
+    if len(note_groups) < 1:
+        return list()
+    note_types = {type(note) for note in note_groups}
+    if len(note_types) > 1 or not isinstance(note_types.pop(), NoteTypes):
+        raise TypeError("All notes must be of the same type")
+
+    NoteType = type(note_groups[0])
+
+    csv_file = Path(current_csv)
+    if not csv_file.is_file():
+        raise error(f"'{csv_file}' was expected to be a file, but isn't")
+    with csv_file.open() as f:
+        dreader = DictReader(f, fieldnames=NoteType._fields)
+        current_notes = {NoteType(**row) for row in dreader}
+    # Find the which notes from the note_groups list aren't in current_notes
+    return list(set(note_groups) - current_notes)
+
+
+def make_notes(
+    note_groups: List[AnyNote], pictures: Pictures, output_csv: SPath, clobber: bool
+) -> None:
+    if len(note_groups) < 1:
+        return None
+    note_types = {type(note) for note in note_groups}
+    if len(note_types) > 1 or not isinstance(note_types.pop(), NoteTypes):
+        raise TypeError("All notes must be of the same type")
+
+    NoteType = type(note_groups[0])
+
+    csv_file = Path(output_csv)
+    csv_update_file = csv_file.with_name(f"{csv_file.stem}-update{csv_file.suffix}")
+    if csv_file.exists() and csv_update_file.exists():
+        raise error(
+            f"""Both '{csv_file}' and '{csv_update_file}' exist
+                        import '{csv_update_file}' into Anki, then run
+                        {PROG_NAME} --merge-csvs '{csv_file}' '{csv_update_file}'
+                        """
+        )
+    elif csv_file.is_file() and not clobber:
+        logging.warn(
+            f"'{csv_file}' already exists, making update file; --clobber to overwrite"
+        )
+        notes_file = csv_update_file
+        new_notes = notes_to_make(current_csv=csv_file, note_groups=note_groups)
+    elif csv_file.exists() and not csv_file.is_file():
+        raise error(f"'{csv_file}' was expected to be a file, but isn't")
+    else:
+        notes_file = csv_file
+        new_notes = note_groups
+
+    logging.info(f"Notes in csv file: {notes_file}")
+
+    with notes_file.open(mode="w") as f:
+        dwriter = DictWriter(f, fieldnames=NoteType._fields)
+        dwriter.writeheader()
+        for note in new_notes:
+            dwriter.writerow(note._asdict())
 
 
 def make_anki_notes(
-    notes: List[NoteGroup], pictures: Pictures, output_csv: SPath
+    notes: List[NoteGroup], pictures: Pictures, output_csv: SPath, clobber: bool,
 ) -> None:
-    raise NotImplementedError("Sorry, can't generate notes yet")
+    csv_file = Path(output_csv)
+    make_notes(
+        note_groups=[note for note in notes if isinstance(note, CharacterGroup)],
+        pictures=pictures,
+        output_csv=csv_file,
+        clobber=clobber,
+    )
+    make_notes(
+        note_groups=[note for note in notes if not isinstance(note, CharacterGroup)],
+        pictures=pictures,
+        output_csv=csv_file.with_name(f"{csv_file.stem}_vocab{csv_file.suffix}"),
+        clobber=clobber,
+    )
 
 
 def main(
@@ -287,7 +366,9 @@ def main(
         background=background,
         text_color=text_color,
     )
-    make_anki_notes(notes=notes, pictures=pictures, output_csv=output_csv)
+    make_anki_notes(
+        notes=notes, pictures=pictures, output_csv=output_csv, clobber=clobber
+    )
 
 
 if __name__ == "__main__":
@@ -381,23 +462,21 @@ if __name__ == "__main__":
         help=f"Verbosity/log level; default '{logging.getLevelName(default_log_level)}'",
     )
 
+    atexit.register(print, parser.format_help())
     args = parser.parse_args()
     if not args.index:
         heisig_index = path_to_heisiglookup(default_rtk_index_file)
     else:
         heisig_index = args.index
-    try:
-        main(
-            text_file=args.file,
-            media_dir=args.media_dir,
-            output_file=args.output_file,
-            clobber=args.clobber,
-            font=args.font,
-            size=args.size,
-            padding=args.padding,
-            background=args.background,
-            text_color=args.text_color,
-            heisig_lookup=heisig_index,
-        )
-    except Exception as err:
-        parser.print_help()
+    main(
+        text_file=args.file,
+        media_dir=args.media_dir,
+        output_file=args.output_file,
+        clobber=args.clobber,
+        font=args.font,
+        size=args.size,
+        padding=args.padding,
+        background=args.background,
+        text_color=args.text_color,
+        heisig_lookup=heisig_index,
+    )
