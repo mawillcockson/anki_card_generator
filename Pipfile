@@ -1,5 +1,7 @@
 [packages]
 arpeggio = "*"
+matplotlib = "*"
+pillow = "*"
 
 [dev-packages]
 black = "*"

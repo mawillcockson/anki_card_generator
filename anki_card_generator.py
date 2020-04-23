@@ -26,20 +26,21 @@ try:
         NewType,
         Optional,
         Tuple,
-        TypedDict,
         TypeVar,
         Union,
         Dict,
         Iterator,
     )
 except ImportError as err:
-    assert sys.version_info >= (3, 8), "Requires Python 3.8 or higher"
+    assert sys.version_info >= (3, 7), "Requires Python 3.7 or higher"
     sys.exit("Could not import needed types from typing module")
 
 try:
     from text2png.text2png import main as text2png, which_exist
 except ImportError as err:
-    sys.exit("Can't find text2png.py; try running:\ngit submodule update --init")
+    raise Exception(
+        "Can't find text2png.py; try running:\ngit submodule update --init"
+    ) from err
 
 ## Program defaults
 PROG_NAME = sys.argv[0]
@@ -165,6 +166,8 @@ def rtk_index_gen(rtk_index_file: SPath) -> HeisigLookup:
             ],
         )
         for row in dreader:
+            if list(row.keys()) == dreader.fieldnames:
+                continue
             lookup_dict[row["character"]] = CharacterGroup(**row)
 
     def lookup(character: str) -> Optional[CharacterGroup]:
@@ -247,8 +250,8 @@ def generate_pictures(
         text_color=text_color,
         clobber=clobber,
     )
-    available_pictures.update(just_generated)
-    return Pictures({file.stem: file for file in available_pictures})
+    available_pictures.update((file.stem, file) for file in just_generated)
+    return available_pictures
 
 
 def notes_to_make(current_csv: SPath, note_groups: List[AnyNote]) -> List[AnyNote]:
@@ -265,7 +268,9 @@ def notes_to_make(current_csv: SPath, note_groups: List[AnyNote]) -> List[AnyNot
         raise error(f"'{csv_file}' was expected to be a file, but isn't")
     with csv_file.open() as f:
         dreader = DictReader(f, fieldnames=NoteType._fields)
-        current_notes = {NoteType(**row) for row in dreader}
+        current_notes = {
+            NoteType(**row) for row in dreader if list(row.keys()) != dreader.fieldnames
+        }
     # Find the which notes from the note_groups list aren't in current_notes
     return list(set(note_groups) - current_notes)
 
@@ -462,7 +467,7 @@ if __name__ == "__main__":
         help=f"Verbosity/log level; default '{logging.getLevelName(default_log_level)}'",
     )
 
-    atexit.register(print, parser.format_help())
+    # atexit.register(print, parser.format_help())
     args = parser.parse_args()
     if not args.index:
         heisig_index = path_to_heisiglookup(default_rtk_index_file)
