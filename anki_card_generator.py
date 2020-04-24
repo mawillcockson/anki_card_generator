@@ -1,21 +1,20 @@
 """Uses a text file to generate and download media for Anki to import to make new notes"""
+import atexit
+import logging
 # mypy: ignore-missing-imports, follow-imports=silent, warn-unreachable, warn-unused-configs, disallow-any-generics
 # mypy: disallow-subclassing-any, disallow-untyped-calls, disallow-untyped-defs, disallow-incomplete-defs
 # mypy: check-untyped-defs, disallow-untyped-decorators, no-implicit-optional, warn-redundant-casts
 # mypy: warn-unused-ignores, warn-return-any, no-implicit-reexport, strict-equality
 import math
 import sys
-from numbers import Number
-from pathlib import Path
-from re import compile as re_compile
-from itertools import compress
-from operator import not_
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
 from csv import DictReader, DictWriter
 from functools import partial
-import atexit
-
-from argparse import ArgumentParser, ArgumentTypeError, Namespace
-import logging
+from itertools import compress
+from numbers import Number
+from operator import not_
+from pathlib import Path
+from re import compile as re_compile
 
 try:
     from typing import (
@@ -190,9 +189,12 @@ def parse_character_group(
 
     character = lines[0]
     heisig_info: Optional[CharacterGroup] = heisig_lookup(character)
+    # NOTE: What's the point of having an optional if you're just going to raise an error on None?
     if not heisig_info:
         raise ValueError(f"Can't find '{character}' in Heisig index")
     story = "\n".join(lines[1:])
+    # NOTE: Needs to do better detection: missing story, optional frame number, etc
+    # Characters missing a story should be commented out with a '#'
     return CharacterGroup(
         character=character,
         keyword=heisig_info.keyword,
