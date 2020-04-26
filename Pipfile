@@ -2,6 +2,7 @@
 arpeggio = "*"
 matplotlib = "*"
 pillow = "*"
+zdict = "*"
 
 [dev-packages]
 black = "*"
